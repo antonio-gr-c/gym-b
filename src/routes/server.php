@@ -2,6 +2,8 @@
 use Slim\Factory\AppFactory;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
+use PHPMailer\PHPMailer\PHPMailer;
+use PHPMailer\PHPMailer\Exception;
 
 require __DIR__ . '/../../vendor/autoload.php';
 require_once __DIR__ . '/../Database.php';
@@ -186,7 +188,60 @@ $app->post('/registrar-consulta', function (Request $request, Response $response
     }
 });
 
+//enviar correo
 
+$app->post('/enviar-correo', function (Request $request, Response $response) {
+    $data = json_decode($request->getBody()->getContents(), true);
+
+    $destinatario = $data['destinatario'] ?? null;
+    $pdfBase64 = $data['pdfBase64'] ?? null;
+    $nombreArchivo = $data['nombreArchivo'] ?? 'consulta.pdf';
+
+    if (!$destinatario || !$pdfBase64) {
+        $response->getBody()->write(json_encode(["error" => "Faltan datos"]));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
+    }
+
+    require __DIR__ . '/../../vendor/autoload.php'; // Asegúrate de tener PHPMailer
+
+    $mail = new PHPMailer(true);
+
+    try {
+        // Configuración SMTP para Gmail
+        $mail->isSMTP();
+        $mail->Host       = 'smtp.gmail.com';
+        $mail->SMTPAuth   = true;
+        $mail->Username   = 'aleztaro14@gmail.com';
+        $mail->Password   = 'hpvhufkmezxrzmje';             
+        $mail->SMTPSecure = 'tls';
+        $mail->Port       = 587;
+
+        // Corregir codificación de caracteres
+        $mail->CharSet = 'UTF-8';
+
+        // Info del correo
+        $mail->setFrom('TU_CORREO@gmail.com', 'Clínica Médica');
+        $mail->addAddress($destinatario);
+        $mail->isHTML(true);
+        $mail->Subject = 'Consulta médica PDF';
+        $mail->Body    = 'Adjunto encontrarás la consulta médica en PDF.';
+
+        // ✅ Adjuntar PDF bien decodificado
+        $pdfData = base64_decode(preg_replace('#^data:application/pdf;base64,#', '', $pdfBase64));
+        $mail->addStringAttachment($pdfData, $nombreArchivo, 'base64', 'application/pdf');
+
+        // Enviar
+        $mail->send();
+        $response->getBody()->write(json_encode(["mensaje" => "Correo enviado con éxito"]));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
+
+    } catch (Exception $e) {
+        $response->getBody()->write(json_encode([
+            "error" => "No se pudo enviar el correo: " . $mail->ErrorInfo
+        ]));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(500);
+    }
+});
 
 
 // Middleware para permitir CORS
