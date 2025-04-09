@@ -4,7 +4,7 @@
 
 namespace Composer\Autoload;
 
-class ComposerStaticInit75f1f50e1e1cfe24695d2d62202dbf2b
+class ComposerStaticInitdea6671db2db2e294d36d213d3a48d7d
 {
     public static $files = array (
         'a4a119a56e50fbb293281d9a48007e0e' => __DIR__ . '/..' . '/symfony/polyfill-php80/bootstrap.php',
@@ -38,12 +38,17 @@ class ComposerStaticInit75f1f50e1e1cfe24695d2d62202dbf2b
         ),
         'F' => 
         array (
+            'Firebase\\JWT\\' => 13,
             'Fig\\Http\\Message\\' => 17,
             'FastRoute\\' => 10,
         ),
         'D' => 
         array (
             'Dotenv\\' => 7,
+        ),
+        'A' => 
+        array (
+            'App\\' => 4,
         ),
     );
 
@@ -98,6 +103,10 @@ class ComposerStaticInit75f1f50e1e1cfe24695d2d62202dbf2b
         array (
             0 => __DIR__ . '/..' . '/graham-campbell/result-type/src',
         ),
+        'Firebase\\JWT\\' => 
+        array (
+            0 => __DIR__ . '/..' . '/firebase/php-jwt/src',
+        ),
         'Fig\\Http\\Message\\' => 
         array (
             0 => __DIR__ . '/..' . '/fig/http-message-util/src',
@@ -109,6 +118,10 @@ class ComposerStaticInit75f1f50e1e1cfe24695d2d62202dbf2b
         'Dotenv\\' => 
         array (
             0 => __DIR__ . '/..' . '/vlucas/phpdotenv/src',
+        ),
+        'App\\' => 
+        array (
+            0 => __DIR__ . '/../..' . '/src',
         ),
     );
 
@@ -124,9 +137,9 @@ class ComposerStaticInit75f1f50e1e1cfe24695d2d62202dbf2b
     public static function getInitializer(ClassLoader $loader)
     {
         return \Closure::bind(function () use ($loader) {
-            $loader->prefixLengthsPsr4 = ComposerStaticInit75f1f50e1e1cfe24695d2d62202dbf2b::$prefixLengthsPsr4;
-            $loader->prefixDirsPsr4 = ComposerStaticInit75f1f50e1e1cfe24695d2d62202dbf2b::$prefixDirsPsr4;
-            $loader->classMap = ComposerStaticInit75f1f50e1e1cfe24695d2d62202dbf2b::$classMap;
+            $loader->prefixLengthsPsr4 = ComposerStaticInitdea6671db2db2e294d36d213d3a48d7d::$prefixLengthsPsr4;
+            $loader->prefixDirsPsr4 = ComposerStaticInitdea6671db2db2e294d36d213d3a48d7d::$prefixDirsPsr4;
+            $loader->classMap = ComposerStaticInitdea6671db2db2e294d36d213d3a48d7d::$classMap;
 
         }, null, ClassLoader::class);
     }
