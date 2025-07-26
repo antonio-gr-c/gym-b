@@ -1,0 +1,15 @@
+[26-Jul-2025 04:51:10 UTC] PHP Fatal error:  Uncaught Slim\Exception\HttpMethodNotAllowedException: Method not allowed. Must be one of: GET in /home/wp4u0tv85wf3/public_html/backend/vendor/slim/slim/Slim/Middleware/RoutingMiddleware.php:79
+Stack trace:
+#0 /home/wp4u0tv85wf3/public_html/backend/vendor/slim/slim/Slim/Middleware/RoutingMiddleware.php(44): Slim\Middleware\RoutingMiddleware->performRouting()
+#1 /home/wp4u0tv85wf3/public_html/backend/vendor/slim/slim/Slim/MiddlewareDispatcher.php(121): Slim\Middleware\RoutingMiddleware->process()
+#2 /home/wp4u0tv85wf3/public_html/backend/src/routes/server.php(26): Psr\Http\Server\RequestHandlerInterface@anonymous->handle()
+#3 /home/wp4u0tv85wf3/public_html/backend/vendor/slim/slim/Slim/MiddlewareDispatcher.php(269): {closure}()
+#4 /home/wp4u0tv85wf3/public_html/backend/src/routes/server.php(43): Psr\Http\Server\RequestHandlerInterface@anonymous->handle()
+#5 /home/wp4u0tv85wf3/public_html/backend/vendor/slim/slim/Slim/MiddlewareDispatcher.php(269): {closure}()
+#6 /home/wp4u0tv85wf3/public_html/backend/vendor/slim/slim/Slim/MiddlewareDispatcher.php(65): Psr\Http\Server\RequestHandlerInterface@anonymous->handle()
+#7 /home/wp4u0tv85wf3/public_html/backend/vendor/slim/slim/Slim/App.php(199): Slim\MiddlewareDispatcher->handle()
+#8 /home/wp4u0tv85wf3/public_html/backend/vendor/slim/slim/Slim/App.php(183): Slim\App->handle()
+#9 /home/wp4u0tv85wf3/public_html/backend/src/routes/server.php(2769): Slim\App->run()
+#10 /home/wp4u0tv85wf3/public_html/backend/public/index.php(4): require_once('/home/wp4u0tv85...')
+#11 {main}
+  thrown in /home/wp4u0tv85wf3/public_html/backend/vendor/slim/slim/Slim/Middleware/RoutingMiddleware.php on line 79
