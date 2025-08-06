@@ -54,6 +54,235 @@ $db = $database->connect();
 
 //ENDPOINTS GYM
 
+$app->get('/gym/actualizar-dias-restantes', function (Request $request, Response $response) use ($db) {
+    // Asegurarnos de trabajar en hora local
+    date_default_timezone_set('America/Mexico_City');
+
+    // Fecha de hoy
+    $hoy    = new DateTime('now');
+    $hoyStr = $hoy->format('Y-m-d');
+
+    // 1) No correr en domingo
+    if ((int)$hoy->format('w') === 0) {
+        $response->getBody()->write(json_encode([
+            "mensaje" => "Hoy es domingo, no se actualizan los días restantes."
+        ]));
+        return $response->withHeader('Content-Type', 'application/json');
+    }
+
+    // 2) Cargar y normalizar las fechas inhábiles
+    $inhStmt   = $db->query("SELECT fecha FROM dias_inhabiles");
+    $raw       = $inhStmt->fetchAll(PDO::FETCH_COLUMN);
+    $inhabiles = array_map(function($d) {
+        return (new DateTime($d))->format('Y-m-d');
+    }, $raw);
+
+    // 3) No correr en día inhábil
+    if (in_array($hoyStr, $inhabiles, true)) {
+        $response->getBody()->write(json_encode([
+            "mensaje" => "Hoy es un día inhábil, no se actualizan los días restantes."
+        ]));
+        return $response->withHeader('Content-Type', 'application/json');
+    }
+
+    // 4) Sólo una actualización por día
+    $stmt = $db->prepare("
+        SELECT valor
+          FROM configuracion_gym
+         WHERE clave = 'ultima_actualizacion_dias_restantes'
+    ");
+    $stmt->execute();
+    if ($stmt->fetchColumn() === $hoyStr) {
+        $response->getBody()->write(json_encode([
+            "mensaje" => "Ya se actualizó hoy."
+        ]));
+        return $response->withHeader('Content-Type', 'application/json');
+    }
+
+    // 5) Registros de clientes activos y con días pendientes
+    $registros = $db
+      ->query("
+        SELECT vp.id, vp.fecha, vp.dias_restantes, vp.fecha_ultima_actualizacion
+          FROM ventas_paquetes_gym vp
+          JOIN clientes_gym c ON c.id_cliente = vp.id_cliente
+         WHERE c.activo = TRUE
+           AND vp.dias_restantes > 0
+           AND vp.fecha_pausa IS NULL
+      ")
+      ->fetchAll(PDO::FETCH_ASSOC);
+
+    // 6) Contar sólo L-S y no inhábiles
+    foreach ($registros as $r) {
+        $inicio      = new DateTime($r['fecha_ultima_actualizacion'] ?: $r['fecha']);
+        $diasPasados = 0;
+        $cursor      = clone $inicio;
+
+        while ($cursor <= $hoy) {
+            $dow      = (int)$cursor->format('w');        // 0=dom, 1=lun ... 6=sáb
+            $fechaTxt = $cursor->format('Y-m-d');
+            if ($dow >= 1 && $dow <= 6 && !in_array($fechaTxt, $inhabiles, true)) {
+                $diasPasados++;
+            }
+            $cursor->modify('+1 day');
+        }
+
+        $nuevo = max(0, $r['dias_restantes'] - $diasPasados);
+        $upd   = $db->prepare("
+            UPDATE ventas_paquetes_gym
+               SET dias_restantes            = :nuevo,
+                   fecha_ultima_actualizacion = :hoy
+             WHERE id = :id
+        ");
+        $upd->execute([
+            ':nuevo' => $nuevo,
+            ':hoy'   => $hoyStr,
+            ':id'    => $r['id'],
+        ]);
+    }
+
+    // 7) Guardar la fecha de esta actualización
+    $db->prepare("
+        UPDATE configuracion_gym
+           SET valor = :h
+         WHERE clave = 'ultima_actualizacion_dias_restantes'
+    ")->execute([':h' => $hoyStr]);
+
+    // 8) Respuesta final
+    $response->getBody()->write(json_encode([
+        "mensaje" => "Días restantes actualizados correctamente (lunes a sábado, sin inhábiles)."
+    ]));
+    return $response->withHeader('Content-Type', 'application/json');
+});
+
+
+
+
+
+$app->get('/gym/dias-inhabiles', function (Request $request, Response $response) use ($db) {
+    // 1) Obtener todos los días inhábiles
+    $stmt = $db->query("
+        SELECT id, fecha, descripcion
+          FROM dias_inhabiles
+         ORDER BY fecha
+    ");
+    $dias = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    // 2) Preparar y devolver la respuesta JSON
+    $payload = ['dias_inhabiles' => $dias];
+    $response->getBody()->write(json_encode($payload, JSON_UNESCAPED_UNICODE));
+
+    return $response
+        ->withHeader('Content-Type', 'application/json')
+        ->withStatus(200);
+});
+
+
+$app->post('/gym/dias-inhabiles', function (Request $request, Response $response) use ($db) {
+    // 1) Obtener datos del body
+    $body = $request->getParsedBody();
+    $fecha       = $body['fecha'] ?? null;         // Espera formato 'YYYY-MM-DD'
+    $descripcion = $body['descripcion'] ?? null;
+
+    // 2) Validaciones básicas
+    if (!$fecha) {
+        $response->getBody()->write(json_encode([
+            "error" => "El campo 'fecha' es obligatorio."
+        ]));
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(400);
+    }
+    // Validar formato de fecha
+    $d = DateTime::createFromFormat('Y-m-d', $fecha);
+    if (!$d || $d->format('Y-m-d') !== $fecha) {
+        $response->getBody()->write(json_encode([
+            "error" => "El campo 'fecha' debe tener el formato YYYY-MM-DD."
+        ]));
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(400);
+    }
+
+    // 3) Insertar en la base
+    try {
+        $stmt = $db->prepare("
+            INSERT INTO dias_inhabiles (fecha, descripcion)
+            VALUES (:fecha, :descripcion)
+        ");
+        $stmt->bindParam(':fecha', $fecha);
+        $stmt->bindParam(':descripcion', $descripcion);
+        $stmt->execute();
+
+        $nuevoId = $db->lastInsertId();
+
+        // 4) Devolver registro creado
+        $payload = [
+            "id"          => (int)$nuevoId,
+            "fecha"       => $fecha,
+            "descripcion" => $descripcion
+        ];
+        $response->getBody()->write(json_encode($payload, JSON_UNESCAPED_UNICODE));
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(201);
+
+    } catch (PDOException $e) {
+        // Manejar clave duplicada u otros errores de BD
+        $msg = $e->getCode() === '23000'
+            ? "Ya existe un día inhábil con esa fecha."
+            : "Error al insertar: " . $e->getMessage();
+
+        $response->getBody()->write(json_encode([
+            "error" => $msg
+        ]));
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(500);
+    }
+});
+
+
+
+$app->delete('/gym/dias-inhabiles/{id}', function (Request $request, Response $response, array $args) use ($db) {
+    $id = (int)$args['id'];
+
+    // 1) Verificar que exista el día inhábil
+    $check = $db->prepare("
+        SELECT 1
+          FROM dias_inhabiles
+         WHERE id = :id
+    ");
+    $check->bindParam(':id', $id, PDO::PARAM_INT);
+    $check->execute();
+
+    if (!$check->fetch()) {
+        $response->getBody()->write(json_encode([
+            "error" => "Día inhábil no encontrado"
+        ]));
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(404);
+    }
+
+    // 2) Eliminar el registro
+    $del = $db->prepare("
+        DELETE FROM dias_inhabiles
+         WHERE id = :id
+    ");
+    $del->bindParam(':id', $id, PDO::PARAM_INT);
+    $del->execute();
+
+    // 3) Devolver confirmación
+    $response->getBody()->write(json_encode([
+        "mensaje" => "Día inhábil eliminado correctamente"
+    ]));
+    return $response
+        ->withHeader('Content-Type', 'application/json')
+        ->withStatus(200);
+});
+
+
+
 $app->post('/gym/login', function (Request $request, Response $response) use ($db) {
     $data = json_decode($request->getBody()->getContents(), true);
 
@@ -342,7 +571,7 @@ $app->put('/gym/servicios/estado/{id}', function (Request $request, Response $re
 });
 
 $app->get('/gym/promociones', function (Request $request, Response $response) use ($db) {
-    $query = "SELECT * FROM promociones_gym";
+    $query = "SELECT * FROM promociones_gym WHERE activo = true ";
     $stmt = $db->query($query);
     $promocionesBD = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
@@ -366,6 +595,29 @@ $app->get('/gym/promociones', function (Request $request, Response $response) us
 });
 
 
+$app->get('/gym/promociones-total', function (Request $request, Response $response) use ($db) {
+    $query = "SELECT * FROM promociones_gym ";
+    $stmt = $db->query($query);
+    $promocionesBD = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $promociones = array_map(function ($promo) {
+        $tipos = [];
+        if ($promo['producto']) $tipos[] = 'producto';
+        if ($promo['servicio']) $tipos[] = 'servicio';
+        if ($promo['paquete']) $tipos[] = 'paquete';
+
+        return [
+            'id' => (int)$promo['id_promocion'],
+            'nombre' => $promo['nombre'],
+            'descuento' => (float)$promo['descuento'],
+            'tipo' => implode(', ', $tipos),
+            'activo' => (bool)$promo['activo']
+        ];
+    }, $promocionesBD);
+
+    $response->getBody()->write(json_encode($promociones));
+    return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
+});
 
 
 $app->post('/gym/promociones', function (Request $request, Response $response) use ($db) {
@@ -473,16 +725,43 @@ $app->get('/gym/paquetes', function (Request $request, Response $response) use (
     return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
 });
 
+
+
 $app->post('/gym/paquetes', function (Request $request, Response $response) use ($db) {
     $data = json_decode($request->getBody()->getContents(), true);
 
     $camposObligatorios = ['nombre', 'descripcion', 'precio', 'duracion', 'unidad', 'tipo_paquete'];
     foreach ($camposObligatorios as $campo) {
         if (!isset($data[$campo])) {
-            $response->getBody()->write(json_encode(["error" => "Falta el campo: $campo"]));
+            $response->getBody()->write(json_encode(["error" => "Faltan el campo: $campo"]));
             return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
         }
     }
+
+
+    // Asignar variables antes de bindParam
+    $nombre = $data['nombre'];
+    $descripcion = $data['descripcion'];
+    $precio = $data['precio'];
+    $duracion = $data['duracion'];
+    $unidad = $data['unidad'];
+    $visita_unica = $data['visita_unica'] ?? false;
+    $semana = $data['semana'] ?? false;
+    $quincena = $data['quincena'] ?? false;
+    $mensualidad_gym = $data['mensualidad_gym'] ?? false;
+    $personal_trainer = $data['personal_trainer'] ?? false;
+    $nutriologo = $data['nutriologo'] ?? false;
+    $fisioterapia = $data['fisioterapia'] ?? false;
+    $area_funcional = $data['area_funcional'] ?? false;
+    $consulta_medica = $data['consulta_medica'] ?? false;
+    $consulta_psicologica = $data['consulta_psicologica'] ?? false;
+    $area_kids = $data['area_kids'] ?? false;
+    $funcional_adultos = $data['funcional_adultos'] ?? false;
+    $area_pesas = $data['area_pesas'] ?? false;
+    $area_fisioterapia = $data['area_fisioterapia'] ?? false;
+    $gym_general = $data['gym_general'] ?? false;
+    $tipo_paquete = $data['tipo_paquete'];
+    $estado = $data['estado'] ?? true;
 
     $query = "INSERT INTO paquetes_gym (
         nombre, descripcion, precio, duracion, unidad,
@@ -497,28 +776,28 @@ $app->post('/gym/paquetes', function (Request $request, Response $response) use 
     )";
 
     $stmt = $db->prepare($query);
-    $stmt->bindParam(':nombre', $data['nombre']);
-    $stmt->bindParam(':descripcion', $data['descripcion']);
-    $stmt->bindParam(':precio', $data['precio']);
-    $stmt->bindParam(':duracion', $data['duracion']);
-    $stmt->bindParam(':unidad', $data['unidad']);
-    $stmt->bindParam(':visita_unica', $data['visita_unica'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':semana', $data['semana'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':quincena', $data['quincena'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':mensualidad_gym', $data['mensualidad_gym'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':personal_trainer', $data['personal_trainer'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':nutriologo', $data['nutriologo'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':fisioterapia', $data['fisioterapia'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':area_funcional', $data['area_funcional'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':consulta_medica', $data['consulta_medica'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':consulta_psicologica', $data['consulta_psicologica'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':area_kids', $data['area_kids'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':funcional_adultos', $data['funcional_adultos'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':area_pesas', $data['area_pesas'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':area_fisioterapia', $data['area_fisioterapia'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':gym_general', $data['gym_general'] ?? false, PDO::PARAM_BOOL);
-    $stmt->bindParam(':tipo_paquete', $data['tipo_paquete']);
-    $stmt->bindParam(':estado', $data['estado'] ?? true, PDO::PARAM_BOOL);
+    $stmt->bindParam(':nombre', $nombre);
+    $stmt->bindParam(':descripcion', $descripcion);
+    $stmt->bindParam(':precio', $precio);
+    $stmt->bindParam(':duracion', $duracion);
+    $stmt->bindParam(':unidad', $unidad);
+    $stmt->bindParam(':visita_unica', $visita_unica, PDO::PARAM_BOOL);
+    $stmt->bindParam(':semana', $semana, PDO::PARAM_BOOL);
+    $stmt->bindParam(':quincena', $quincena, PDO::PARAM_BOOL);
+    $stmt->bindParam(':mensualidad_gym', $mensualidad_gym, PDO::PARAM_BOOL);
+    $stmt->bindParam(':personal_trainer', $personal_trainer, PDO::PARAM_BOOL);
+    $stmt->bindParam(':nutriologo', $nutriologo, PDO::PARAM_BOOL);
+    $stmt->bindParam(':fisioterapia', $fisioterapia, PDO::PARAM_BOOL);
+    $stmt->bindParam(':area_funcional', $area_funcional, PDO::PARAM_BOOL);
+    $stmt->bindParam(':consulta_medica', $consulta_medica, PDO::PARAM_BOOL);
+    $stmt->bindParam(':consulta_psicologica', $consulta_psicologica, PDO::PARAM_BOOL);
+    $stmt->bindParam(':area_kids', $area_kids, PDO::PARAM_BOOL);
+    $stmt->bindParam(':funcional_adultos', $funcional_adultos, PDO::PARAM_BOOL);
+    $stmt->bindParam(':area_pesas', $area_pesas, PDO::PARAM_BOOL);
+    $stmt->bindParam(':area_fisioterapia', $area_fisioterapia, PDO::PARAM_BOOL);
+    $stmt->bindParam(':gym_general', $gym_general, PDO::PARAM_BOOL);
+    $stmt->bindParam(':tipo_paquete', $tipo_paquete);
+    $stmt->bindParam(':estado', $estado, PDO::PARAM_BOOL);
 
     if ($stmt->execute()) {
         $response->getBody()->write(json_encode(["mensaje" => "Paquete registrado correctamente"]));
@@ -528,6 +807,9 @@ $app->post('/gym/paquetes', function (Request $request, Response $response) use 
         return $response->withHeader('Content-Type', 'application/json')->withStatus(500);
     }
 });
+
+
+
 
 $app->put('/gym/paquetes/{id}', function (Request $request, Response $response, array $args) use ($db) {
     $id = $args['id'];
@@ -540,6 +822,7 @@ $app->put('/gym/paquetes/{id}', function (Request $request, Response $response, 
             return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
         }
     }
+
 
     // Asignar variables antes de bindParam
     $nombre = $data['nombre'];
@@ -695,7 +978,7 @@ $app->post('/gym/ventas/productos', function (Request $request, Response $respon
     $campos = ['cantidad', 'precio', 'descuento', 'id_producto'];
     foreach ($campos as $campo) {
         if (!isset($data[$campo])) {
-            $response->getBody()->write(json_encode(["error" => "Falta el campo: $campo"]));
+            $response->getBody()->write(json_encode(["error" => "Faltan datos"]));
             return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
         }
     }
@@ -765,13 +1048,18 @@ $app->post('/gym/ventas/servicios', function (Request $request, Response $respon
     $data = json_decode($request->getBody()->getContents(), true);
 
     // Validar campos requeridos
-    $campos = ['cantidad', 'precio', 'descuento', 'total', 'fecha', 'id_servicio', 'id_cliente'];
-    foreach ($campos as $campo) {
+    $camposRequeridos = ['cantidad', 'precio', 'id_servicio', 'id_cliente'];
+    foreach ($camposRequeridos as $campo) {
         if (!isset($data[$campo])) {
-            $response->getBody()->write(json_encode(["error" => "Falta el campo: $campo"]));
+            $response->getBody()->write(json_encode(["error" => "Falta el campo requerido: $campo"]));
             return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
         }
     }
+
+    // Valores opcionales con defaults
+    $descuento = $data['descuento'] ?? 0.00;
+    $fecha_agendada = $data['fecha_agendada'] ?? null;
+    $total = $data['precio'] * $data['cantidad'] - $descuento;
 
     // Validar existencia del servicio
     $stmtServicio = $db->prepare("SELECT COUNT(*) FROM servicios_gym WHERE id_servicio = :id_servicio");
@@ -792,19 +1080,25 @@ $app->post('/gym/ventas/servicios', function (Request $request, Response $respon
     }
 
     // Insertar la venta
-    $query = "INSERT INTO venta_servicios_gym (cantidad, precio, descuento, total, fecha, id_servicio, id_cliente)
-              VALUES (:cantidad, :precio, :descuento, :total, :fecha, :id_servicio, :id_cliente)";
+    $query = "INSERT INTO venta_servicios_gym 
+              (cantidad, precio, descuento, total, fecha, fecha_agendada, id_servicio, id_cliente)
+              VALUES (:cantidad, :precio, :descuento, :total, NOW(), :fecha_agendada, :id_servicio, :id_cliente)";
+    
     $stmt = $db->prepare($query);
     $stmt->bindParam(':cantidad', $data['cantidad']);
     $stmt->bindParam(':precio', $data['precio']);
-    $stmt->bindParam(':descuento', $data['descuento']);
-    $stmt->bindParam(':total', $data['total']);
-    $stmt->bindParam(':fecha', $data['fecha']);
+    $stmt->bindParam(':descuento', $descuento);
+    $stmt->bindParam(':total', $total);
+    $stmt->bindParam(':fecha_agendada', $fecha_agendada);
     $stmt->bindParam(':id_servicio', $data['id_servicio']);
     $stmt->bindParam(':id_cliente', $data['id_cliente']);
 
     if ($stmt->execute()) {
-        $response->getBody()->write(json_encode(["mensaje" => "Venta de servicio registrada correctamente"]));
+        $response->getBody()->write(json_encode([
+            "mensaje" => "Venta de servicio registrada correctamente",
+            "total" => $total,
+            "id_venta" => $db->lastInsertId()
+        ]));
         return $response->withHeader('Content-Type', 'application/json')->withStatus(201);
     } else {
         $response->getBody()->write(json_encode(["error" => "No se pudo registrar la venta"]));
@@ -827,21 +1121,26 @@ $app->post('/gym/ventas/paquetes', function (Request $request, Response $respons
     $data = json_decode($request->getBody()->getContents(), true);
 
     // Validar campos obligatorios
-    foreach (['id_paquete','id_cliente','precio'] as $campo) {
+    foreach (["id_paquete","id_cliente","precio"] as $campo) {
         if (!isset($data[$campo])) {
-            $response->getBody()->write(json_encode(["error" => "Falta el campo: $campo"]));
+            $response->getBody()->write(json_encode(["error" => "Faltan datos"]));
             return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
         }
     }
 
-    // Validar existencia del paquete
-    $stmtP = $db->prepare("SELECT COUNT(*) FROM paquetes_gym WHERE id_paquete = :id_paquete");
+    // id_promocion es opcional
+    $id_promocion = isset($data['id_promocion']) ? $data['id_promocion'] : null;
+
+    // Validar existencia del paquete y obtener duracion
+    $stmtP = $db->prepare("SELECT duracion FROM paquetes_gym WHERE id_paquete = :id_paquete");
     $stmtP->bindParam(':id_paquete', $data['id_paquete']);
     $stmtP->execute();
-    if ($stmtP->fetchColumn() == 0) {
+    $paquete = $stmtP->fetch(PDO::FETCH_ASSOC);
+    if (!$paquete) {
         $response->getBody()->write(json_encode(["error" => "Paquete no encontrado"]));
         return $response->withHeader('Content-Type', 'application/json')->withStatus(404);
     }
+    $duracion = (int)$paquete['duracion'];
 
     // Validar existencia del cliente
     $stmtC = $db->prepare("SELECT COUNT(*) FROM clientes_gym WHERE id_cliente = :id_cliente");
@@ -852,17 +1151,22 @@ $app->post('/gym/ventas/paquetes', function (Request $request, Response $respons
         return $response->withHeader('Content-Type', 'application/json')->withStatus(404);
     }
 
-    // Preparar inserción
-    $query = "INSERT INTO ventas_paquetes_gym (id_paquete, id_cliente, meses, precio, descuento)
-              VALUES (:id_paquete, :id_cliente, :meses, :precio, :descuento)";
-    $stmt = $db->prepare($query);
-    $meses     = $data['meses']     ?? null;
+    // Calcular dias_restantes
+    $meses = isset($data['meses']) ? (int)$data['meses'] : 1;
     $descuento = $data['descuento'] ?? 0;
+    $dias_restantes = $duracion * $meses;
+
+    // Preparar inserción
+    $query = "INSERT INTO ventas_paquetes_gym (id_paquete, id_cliente, meses, precio, descuento, dias_restantes, id_promocion)
+              VALUES (:id_paquete, :id_cliente, :meses, :precio, :descuento, :dias_restantes, :id_promocion)";
+    $stmt = $db->prepare($query);
     $stmt->bindParam(':id_paquete', $data['id_paquete']);
     $stmt->bindParam(':id_cliente', $data['id_cliente']);
     $stmt->bindParam(':meses', $meses);
     $stmt->bindParam(':precio', $data['precio']);
     $stmt->bindParam(':descuento', $descuento);
+    $stmt->bindParam(':dias_restantes', $dias_restantes);
+    $stmt->bindParam(':id_promocion', $id_promocion);
 
     if ($stmt->execute()) {
         $response->getBody()->write(json_encode(["mensaje" => "Venta de paquete registrada correctamente"]));
@@ -880,6 +1184,7 @@ $app->get('/gym/clientes/paquetes', function (Request $request, Response $respon
             CONCAT(c.nombre, ' ', c.apellido_paterno, ' ', c.apellido_materno) AS nombre_completo,
             c.edad,
             c.telefono,
+            c.activo,
             pg.nombre AS paquete,
             vp.dias_restantes
         FROM clientes_gym c
@@ -964,35 +1269,59 @@ $app->put('/gym/clientes/{id}', function (Request $request, Response $response, 
 });
 
 $app->put('/gym/clientes/estado/{id}', function (Request $request, Response $response, array $args) use ($db) {
-    $id = $args['id'];
+    $id = (int)$args['id'];
 
-    // Obtener estado actual
-    $stmt = $db->prepare("SELECT activo FROM clientes_gym WHERE id_cliente = :id");
-    $stmt->bindParam(':id', $id);
+    // 1) Obtener estado actual
+    $stmt = $db->prepare("
+        SELECT activo
+          FROM clientes_gym
+         WHERE id_cliente = :id
+    ");
+    $stmt->bindParam(':id', $id, PDO::PARAM_INT);
     $stmt->execute();
     $cliente = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$cliente) {
-        $response->getBody()->write(json_encode(["error" => "Cliente no encontrado"]));
-        return $response->withHeader('Content-Type', 'application/json')->withStatus(404);
+        $response->getBody()->write(json_encode([
+            "error" => "Cliente no encontrado"
+        ]));
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(404);
     }
 
-    // Invertir estado
+    // 2) Calcular nuevo estado e invertirlo
     $nuevoEstado = $cliente['activo'] ? 0 : 1;
+    $mensaje     = $nuevoEstado
+        ? "Cliente activado"
+        : "Cliente desactivado";
 
-    $update = $db->prepare("UPDATE clientes_gym SET activo = :activo WHERE id_cliente = :id");
-    $update->bindParam(':activo', $nuevoEstado, PDO::PARAM_BOOL);
-    $update->bindParam(':id', $id);
+    // 3) Guardar el nuevo estado
+    $upd = $db->prepare("
+        UPDATE clientes_gym
+           SET activo = :activo
+         WHERE id_cliente = :id
+    ");
+    $upd->bindParam(':activo', $nuevoEstado, PDO::PARAM_BOOL);
+    $upd->bindParam(':id', $id, PDO::PARAM_INT);
 
-    if ($update->execute()) {
-        $mensaje = $nuevoEstado ? "Cliente activado" : "Cliente desactivado";
-        $response->getBody()->write(json_encode(["mensaje" => $mensaje]));
-        return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
+    if ($upd->execute()) {
+        $response->getBody()->write(json_encode([
+            "mensaje" => $mensaje
+        ]));
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(200);
     } else {
-        $response->getBody()->write(json_encode(["error" => "No se pudo actualizar el estado del cliente"]));
-        return $response->withHeader('Content-Type', 'application/json')->withStatus(500);
+        $response->getBody()->write(json_encode([
+            "error" => "No se pudo actualizar el estado del cliente"
+        ]));
+        return $response
+            ->withHeader('Content-Type', 'application/json')
+            ->withStatus(500);
     }
 });
+
 
 
 $app->post('/gym/acceso', function (Request $request, Response $response) use ($db) {
@@ -1025,7 +1354,7 @@ $app->post('/gym/acceso', function (Request $request, Response $response) use ($
 
     // Buscar la última venta de paquete activa (dias_restantes > 0)
     $stmtV = $db->prepare("
-        SELECT vp.dias_restantes, p.nombre AS paquete
+        SELECT vp.dias_restantes, p.nombre AS paquete, vp.id_promocion
         FROM ventas_paquetes_gym vp
         JOIN paquetes_gym p ON p.id_paquete = vp.id_paquete
         WHERE vp.id_cliente = :id_cliente
@@ -1045,6 +1374,20 @@ $app->post('/gym/acceso', function (Request $request, Response $response) use ($
         return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
     }
 
+    // Buscar datos de la promoción si existe
+    $nombre_promocion = null;
+    $descuento_promocion = null;
+    if (!empty($venta['id_promocion'])) {
+        $stmtPromo = $db->prepare("SELECT nombre, descuento FROM promociones_gym WHERE id_promocion = :id_promocion");
+        $stmtPromo->bindParam(':id_promocion', $venta['id_promocion']);
+        $stmtPromo->execute();
+        $promo = $stmtPromo->fetch(PDO::FETCH_ASSOC);
+        if ($promo) {
+            $nombre_promocion = $promo['nombre'];
+            $descuento_promocion = $promo['descuento'];
+        }
+    }
+
     // Registrar la entrada en la tabla entradas
     $insert = $db->prepare("INSERT INTO entradas (fecha) VALUES (NOW())");
     $insert->execute();
@@ -1053,7 +1396,9 @@ $app->post('/gym/acceso', function (Request $request, Response $response) use ($
     $response->getBody()->write(json_encode([
         'acceso'         => true,
         'dias_restantes' => (int)$venta['dias_restantes'],
-        'paquete'        => $venta['paquete']
+        'paquete'        => $venta['paquete'],
+        'promocion'      => $nombre_promocion,
+        'descuento'      => $descuento_promocion
     ]));
     return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
 });
@@ -1062,7 +1407,7 @@ $app->post('/gym/acceso', function (Request $request, Response $response) use ($
 $app->get('/gym/dashboard', function (Request $request, Response $response) use ($db) {
     // Ventas del día - Productos
     $stmt = $db->prepare("
-        SELECT IFNULL(SUM((precio * cantidad) * (1 - descuento/100)),0) 
+        SELECT IFNULL(SUM((precio) ),0) 
         FROM ventas_productos_gym 
         WHERE DATE(fecha) = CURDATE()
     ");
@@ -1080,7 +1425,7 @@ $app->get('/gym/dashboard', function (Request $request, Response $response) use 
 
     // Ventas del día - Paquetes
     $stmt = $db->prepare("
-        SELECT IFNULL(SUM((precio - descuento)),0) 
+       SELECT IFNULL(SUM((precio)),0) 
         FROM ventas_paquetes_gym 
         WHERE DATE(fecha) = CURDATE()
     ");
@@ -1091,7 +1436,7 @@ $app->get('/gym/dashboard', function (Request $request, Response $response) use 
 
     // Ventas del mes - Productos
     $stmt = $db->prepare("
-        SELECT IFNULL(SUM((precio * cantidad) * (1 - descuento/100)),0) 
+        SELECT IFNULL(SUM((precio)),0) 
         FROM ventas_productos_gym 
         WHERE YEAR(fecha)=YEAR(CURDATE()) AND MONTH(fecha)=MONTH(CURDATE())
     ");
@@ -1109,7 +1454,7 @@ $app->get('/gym/dashboard', function (Request $request, Response $response) use 
 
     // Ventas del mes - Paquetes
     $stmt = $db->prepare("
-        SELECT IFNULL(SUM((precio - descuento)),0) 
+        SELECT IFNULL(SUM((precio)),0) 
         FROM ventas_paquetes_gym 
         WHERE YEAR(fecha)=YEAR(CURDATE()) AND MONTH(fecha)=MONTH(CURDATE())
     ");
@@ -1194,11 +1539,221 @@ $app->get('/gym/entradas/semana', function (Request $request, Response $response
         ->withStatus(200);
 });
 
+$app->get('/gym/ventas/servicios', function (Request $request, Response $response) use ($db) {
+    $params = $request->getQueryParams();
+    $fecha  = $params['fecha'] ?? null;
+
+    // 1) Consulta base con filtro de sólo fechas agendadas >= hoy
+    $query = "
+        SELECT 
+            vs.id_venta,
+            vs.fecha,
+            vs.fecha_agendada,
+            vs.precio,
+            vs.cantidad,
+            vs.total,
+            s.nombre AS nombre_servicio,
+            CONCAT(c.nombre, ' ', c.apellido_paterno) AS nombre_cliente
+        FROM venta_servicios_gym vs
+        JOIN servicios_gym s ON s.id_servicio = vs.id_servicio
+        JOIN clientes_gym c ON c.id_cliente = vs.id_cliente
+        WHERE DATE(vs.fecha_agendada) >= CURDATE()
+    ";
+
+    // 2) Si llega parámetro `fecha`, lo añadimos como filtro adicional
+    if ($fecha) {
+        $query .= " AND (DATE(vs.fecha) = :fecha OR DATE(vs.fecha_agendada) = :fecha)";
+    }
+
+    $stmt = $db->prepare($query);
+
+    // 3) Bind de parámetro si aplica
+    if ($fecha) {
+        $stmt->bindParam(':fecha', $fecha);
+    }
+
+    // 4) Ejecutar y devolver resultados
+    $stmt->execute();
+    $ventas = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+    $response->getBody()->write(json_encode($ventas, JSON_UNESCAPED_UNICODE));
+    return $response
+        ->withHeader('Content-Type', 'application/json')
+        ->withStatus(200);
+});
+
 
 
 //FIN ENDPOINTS GYM
 
 
+
+//ENDPOINTS CLIENTES GYM
+
+$app->get('/gym/usuarios', function (Request $request, Response $response) use ($db) {
+    $sql = "SELECT id_usuario, usuario FROM usuarios_gym";
+    try {
+        $stmt = $db->query($sql);
+        $clientes = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        $response->getBody()->write(json_encode($clientes));
+        return $response->withHeader('Content-Type', 'application/json');
+    } catch (PDOException $e) {
+        $error = ["error" => $e->getMessage()];
+        $response->getBody()->write(json_encode($error));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(500);
+    }
+});
+
+// Endpoint para verificar estado del permiso
+$app->get('/gym/corte-caja/estado', function (Request $request, Response $response) use ($db) {
+    $stmt = $db->query("SELECT permiso_activo, ultimo_corte FROM permisos_corte_caja WHERE id = 1");
+    $estado = $stmt->fetch(PDO::FETCH_ASSOC);
+    
+    $response->getBody()->write(json_encode($estado));
+    return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
+});
+
+// Endpoint para cambiar estado del permiso (solo admin)
+$app->post('/gym/corte-caja/toggle-permiso', function (Request $request, Response $response) use ($db) {
+    $data = json_decode($request->getBody()->getContents(), true);
+    $id_usuario = $data['id_usuario'] ?? null;
+    
+    if ($id_usuario != 1) {
+        $response->getBody()->write(json_encode(["error" => "No autorizado"]));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(403);
+    }
+    
+    // Cambiar el estado del permiso
+    $db->query("UPDATE permisos_corte_caja SET permiso_activo = NOT permiso_activo WHERE id = 1");
+    
+    // Obtener y devolver el nuevo estado
+    $stmt = $db->query("SELECT permiso_activo FROM permisos_corte_caja WHERE id = 1");
+    $nuevoEstado = $stmt->fetchColumn();
+    
+    $response->getBody()->write(json_encode(["permiso_activo" => (bool)$nuevoEstado]));
+    return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
+});
+
+// Endpoint para generar reporte de corte de caja
+$app->post('/gym/corte-caja/reporte', function (Request $request, Response $response) use ($db) {
+    $data = json_decode($request->getBody()->getContents(), true);
+    $idUsuario = $data['id_usuario'] ?? null;
+
+    if (!$idUsuario) {
+        $response->getBody()->write(json_encode([
+            "error" => "ID de usuario no proporcionado"
+        ]));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(400);
+    }
+
+    $esAdmin = ($idUsuario == 1); // Admin identificado (ya no usaremos excepción más adelante)
+
+    // 1. Verificar si los cortes están permitidos
+    $stmtPermiso = $db->query("SELECT permiso_activo FROM permisos_corte_caja WHERE id = 1");
+    $permisoActivo = (bool) $stmtPermiso->fetchColumn();
+
+    if (!$permisoActivo && $idUsuario != 1) { // Solo admin puede saltarse permiso inactivo
+        $response->getBody()->write(json_encode([
+            "error" => "Los cortes de caja están desactivados temporalmente"
+        ]));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(403);
+    }
+
+    // 2. Verificar si ya se hizo un corte hoy (ahora aplica para TODOS, incluso admin)
+    $stmtUltimoCorte = $db->query("SELECT ultimo_corte FROM permisos_corte_caja WHERE id = 1");
+    $ultimoCorte = $stmtUltimoCorte->fetchColumn();
+
+    if ($ultimoCorte && date('Y-m-d', strtotime($ultimoCorte)) === date('Y-m-d')) {
+        $response->getBody()->write(json_encode([
+            "error" => "Ya se realizó un corte de caja hoy. Debe resetearlo primero.",
+            "ultimo_corte" => $ultimoCorte
+        ]));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(403);
+    }
+
+    // 2. Verificar horario laboral 
+    /*
+    date_default_timezone_set('America/Mexico_City');
+    $horaActual = (int) date('H');
+
+    if (($horaActual < 8 || $horaActual >= 22)) {
+        $response->getBody()->write(json_encode([
+            "error" => "El corte de caja solo está disponible de 8:00 a 22:00 hrs"
+        ]));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(403);
+    }
+    */
+
+    // 3. Verificar si ya se hizo un corte hoy (ahora bloquea a todos, incluso admin)
+    $stmtUltimoCorte = $db->query("SELECT ultimo_corte FROM permisos_corte_caja WHERE id = 1");
+    $ultimoCorte = $stmtUltimoCorte->fetchColumn();
+
+    if ($ultimoCorte && date('Y-m-d', strtotime($ultimoCorte)) === date('Y-m-d')) {
+        $response->getBody()->write(json_encode([
+            "error" => "Ya se realizó un corte de caja hoy",
+            "ultimo_corte" => $ultimoCorte
+        ]));
+        return $response->withHeader('Content-Type', 'application/json')->withStatus(403);
+    }
+
+    // 4. Obtener ventas del día
+    $ventasDia = [];
+
+    // Productos
+    $stmtProd = $db->query("
+        SELECT p.nombre, vp.cantidad, vp.precio, vp.descuento, 
+               (vp.precio) AS total
+        FROM ventas_productos_gym vp
+        JOIN productos_gym p ON p.id_producto = vp.id_producto
+        WHERE DATE(vp.fecha) = CURDATE()
+    ");
+    $ventasDia['productos'] = $stmtProd->fetchAll(PDO::FETCH_ASSOC);
+
+    // Servicios
+    $stmtServ = $db->query("
+        SELECT s.nombre, vs.cantidad, vs.precio, vs.descuento, vs.total
+        FROM venta_servicios_gym vs
+        JOIN servicios_gym s ON s.id_servicio = vs.id_servicio
+        WHERE DATE(vs.fecha) = CURDATE()
+    ");
+    $ventasDia['servicios'] = $stmtServ->fetchAll(PDO::FETCH_ASSOC);
+
+    // Paquetes
+    $stmtPaq = $db->query("
+        SELECT pg.nombre, vp.meses, vp.precio, vp.descuento, 
+               (vp.precio) AS total
+        FROM ventas_paquetes_gym vp
+        JOIN paquetes_gym pg ON pg.id_paquete = vp.id_paquete
+        WHERE DATE(vp.fecha) = CURDATE()
+    ");
+    $ventasDia['paquetes'] = $stmtPaq->fetchAll(PDO::FETCH_ASSOC);
+
+    // 5. Calcular total general
+    $totalProductos = array_sum(array_column($ventasDia['productos'], 'total'));
+    $totalServicios = array_sum(array_column($ventasDia['servicios'], 'total'));
+    $totalPaquetes = array_sum(array_column($ventasDia['paquetes'], 'total'));
+    $ventasDia['total_general'] = $totalProductos + $totalServicios + $totalPaquetes;
+
+    // 6. Registrar la fecha del último corte
+    $db->query("UPDATE permisos_corte_caja SET ultimo_corte = NOW() WHERE id = 1");
+
+    // 7. Enviar respuesta
+    $response->getBody()->write(json_encode($ventasDia));
+    return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
+});
+
+// Endpoint para reiniciar el contador de cortes (solo admin)
+$app->post('/gym/corte-caja/reset', function (Request $request, Response $response) use ($db) {
+    // Verificar que sea admin (puedes implementar tu lógica de autenticación aquí)
+    
+    $db->query("UPDATE permisos_corte_caja SET ultimo_corte = NULL WHERE id = 1");
+    
+    $response->getBody()->write(json_encode([
+        "mensaje" => "Contador de corte diario reiniciado",
+        "permiso_activo" => true
+    ]));
+    return $response->withHeader('Content-Type', 'application/json')->withStatus(200);
+});
 
 
 
